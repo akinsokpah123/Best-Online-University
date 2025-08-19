@@ -1,1 +1,0 @@
-Akin Best University
