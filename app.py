@@ -1,235 +1,225 @@
-# app.py
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for, send_file
-import sqlite3
+# ===============================
+# Akin Online University
+# All-in-one deployable Flask App
+# ===============================
+
 import os
-import uuid
-import datetime
+import sqlite3
+from flask import Flask, request, jsonify, render_template_string, send_file
+from datetime import datetime, timedelta
 import requests
-from fpdf import FPDF
+import pdfkit
 
-# ---------- Configuration ----------
+# -----------------------
+# Setup Flask
+# -----------------------
 app = Flask(__name__)
-DATABASE = "university.db"
-LONESTAR_API_KEY = os.getenv("LONESTAR_API_KEY")  # your Lonestar API key
-REGISTRATION_FEE = 25
-TOTAL_TUITION = 200
 
-# ---------- Database setup ----------
+# -----------------------
+# Lonestar API
+# -----------------------
+LONESTAR_API_KEY = os.getenv("LONESTAR_API_KEY") or "40c621e1cdad417ab0b1b944e2ab9072"
+
+# -----------------------
+# SQLite Database
+# -----------------------
+DB_NAME = "university.db"
+
 def init_db():
-    conn = sqlite3.connect(DATABASE)
+    conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Users table
+    
+    # Students table
     c.execute("""
     CREATE TABLE IF NOT EXISTS students (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
+        full_name TEXT,
         email TEXT UNIQUE,
         password TEXT,
-        registration_paid INTEGER DEFAULT 0,
-        tuition_paid INTEGER DEFAULT 0,
-        enrollment_date TEXT,
-        scholarship INTEGER DEFAULT 0,
-        credits INTEGER DEFAULT 0,
-        grade REAL DEFAULT 0.0
+        degree TEXT,
+        registered_on TEXT,
+        subscription_end TEXT,
+        scholarship INTEGER DEFAULT 0
     )
     """)
+    
     # Courses table
     c.execute("""
     CREATE TABLE IF NOT EXISTS courses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT,
         description TEXT,
-        duration_months INTEGER
+        level TEXT,
+        price REAL
     )
     """)
+    
+    # Enrollments table
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS enrollments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER,
+        course_id INTEGER,
+        start_date TEXT,
+        end_date TEXT,
+        paid REAL DEFAULT 0,
+        completed INTEGER DEFAULT 0,
+        FOREIGN KEY(student_id) REFERENCES students(id),
+        FOREIGN KEY(course_id) REFERENCES courses(id)
+    )
+    """)
+    
     # Payments table
     c.execute("""
     CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         student_id INTEGER,
         amount REAL,
-        date TEXT,
-        payment_type TEXT,
-        reference TEXT
+        payment_method TEXT,
+        payment_date TEXT,
+        verified INTEGER DEFAULT 0,
+        FOREIGN KEY(student_id) REFERENCES students(id)
     )
     """)
+    
     conn.commit()
     conn.close()
 
 init_db()
 
-# ---------- Helper functions ----------
-def query_db(query, args=(), one=False):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute(query, args)
-    rv = c.fetchall()
-    conn.commit()
-    conn.close()
-    return (rv[0] if rv else None) if one else rv
+# -----------------------
+# Templates
+# -----------------------
+HOME_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>Akin Online University</title>
+<style>
+body {font-family: Arial,sans-serif; background:#f4f4f4; padding:20px;}
+.container {max-width:900px; margin:auto; background:white; padding:20px; border-radius:10px;}
+input, select {width:100%; padding:10px; margin:5px 0;}
+button {padding:10px 20px; background:#4CAF50; color:white; border:none; cursor:pointer;}
+button:hover {background:#45a049;}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Welcome to Akin Online University 🎓</h1>
+<p>Enroll for free undergraduate courses or pay for advanced courses.</p>
 
-def make_payment(student_id, amount):
-    """Simulate Lonestar Mobile Money payment"""
-    reference = str(uuid.uuid4())
-    query_db("INSERT INTO payments (student_id, amount, date, payment_type, reference) VALUES (?, ?, ?, ?, ?)",
-             (student_id, amount, datetime.datetime.now().isoformat(), "mobile_money", reference))
-    return True, reference
+<h2>Register Student</h2>
+<form id="registerForm">
+<input type="text" id="full_name" placeholder="Full Name" required/>
+<input type="email" id="email" placeholder="Email" required/>
+<input type="password" id="password" placeholder="Password" required/>
+<select id="degree">
+<option value="undergraduate">Undergraduate (Free First Course)</option>
+<option value="graduate">Graduate</option>
+<option value="postgraduate">Postgraduate</option>
+</select>
+<button type="button" onclick="register()">Register</button>
+</form>
 
-def generate_certificate(student_name, course_title):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "Akin Online University", ln=True, align="C")
-    pdf.cell(0, 10, f"Certificate of Completion", ln=True, align="C")
-    pdf.ln(20)
-    pdf.set_font("Arial", '', 12)
-    pdf.multi_cell(0, 10, f"This is to certify that {student_name} has successfully completed the course '{course_title}'.")
-    filename = f"certificate_{uuid.uuid4().hex}.pdf"
-    pdf.output(filename)
-    return filename
+<h2>Enroll in Course</h2>
+<form id="enrollForm">
+<input type="number" id="student_id" placeholder="Student ID" required/>
+<input type="number" id="course_id" placeholder="Course ID" required/>
+<button type="button" onclick="enroll()">Enroll</button>
+</form>
 
-def generate_transcript(student):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "Akin Online University", ln=True, align="C")
-    pdf.cell(0, 10, "Official Transcript", ln=True, align="C")
-    pdf.ln(10)
-    pdf.set_font("Arial", '', 12)
-    pdf.cell(0, 10, f"Student Name: {student[1]}", ln=True)
-    pdf.cell(0, 10, f"Email: {student[2]}", ln=True)
-    pdf.cell(0, 10, f"Enrollment Date: {student[6]}", ln=True)
-    pdf.cell(0, 10, f"Credits Earned: {student[8]}", ln=True)
-    pdf.cell(0, 10, f"GPA: {student[9]}", ln=True)
-    filename = f"transcript_{uuid.uuid4().hex}.pdf"
-    pdf.output(filename)
-    return filename
+<div id="messages"></div>
+</div>
+<script>
+async function register(){
+    let data = {
+        full_name: document.getElementById('full_name').value,
+        email: document.getElementById('email').value,
+        password: document.getElementById('password').value,
+        degree: document.getElementById('degree').value
+    };
+    let res = await fetch('/register', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    let json = await res.json();
+    document.getElementById('messages').innerText = JSON.stringify(json);
+}
 
-# ---------- Routes ----------
+async function enroll(){
+    let data = {
+        student_id: document.getElementById('student_id').value,
+        course_id: document.getElementById('course_id').value
+    };
+    let res = await fetch('/enroll', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    let json = await res.json();
+    document.getElementById('messages').innerText = JSON.stringify(json);
+}
+</script>
+</body>
+</html>
+"""
+
+# -----------------------
+# Routes
+# -----------------------
+@app.route("/")
+def home():
+    return render_template_string(HOME_PAGE)
+
 @app.route("/healthz")
 def healthz():
     return "ok", 200
 
-@app.route("/")
-def home():
-    courses = query_db("SELECT id, title, description, duration_months FROM courses")
-    html = """
-    <h1>Welcome to Akin Online University</h1>
-    <a href='/register'>Register</a> | <a href='/login'>Login</a>
-    <h2>Courses Available</h2>
-    {% for c in courses %}
-        <div>
-            <h3>{{c[1]}}</h3>
-            <p>{{c[2]}}</p>
-            <p>Duration: {{c[3]}} months</p>
-        </div>
-    {% endfor %}
-    """
-    return render_template_string(html, courses=courses)
-
-@app.route("/register", methods=["GET", "POST"])
+# -----------------------
+# Student Registration
+# -----------------------
+@app.route("/register", methods=["POST"])
 def register():
-    html = """
-    <h1>Student Registration</h1>
-    <form method='post'>
-        Name: <input name='name'><br>
-        Email: <input name='email'><br>
-        Password: <input type='password' name='password'><br>
-        <button type='submit'>Register & Pay $25</button>
-    </form>
-    """
-    if request.method == "POST":
-        name = request.form['name']
-        email = request.form['email']
-        password = request.form['password']
-        query_db("INSERT INTO students (name, email, password, enrollment_date) VALUES (?, ?, ?, ?)",
-                 (name, email, password, datetime.datetime.now().isoformat()))
-        student = query_db("SELECT id FROM students WHERE email=?", (email,), one=True)
-        success, ref = make_payment(student[0], REGISTRATION_FEE)
-        query_db("UPDATE students SET registration_paid=1 WHERE id=?", (student[0],))
-        return f"Registered successfully! Registration payment ref: {ref} <a href='/'>Home</a>"
-    return render_template_string(html)
+    data = request.json
+    full_name = data.get("full_name")
+    email = data.get("email")
+    password = data.get("password")
+    degree = data.get("degree")
+    registered_on = datetime.utcnow().isoformat()
+    subscription_end = (datetime.utcnow() + timedelta(days=180)).isoformat()  # 6 months default
+    
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO students (full_name,email,password,degree,registered_on,subscription_end) VALUES (?,?,?,?,?,?)",
+                  (full_name,email,password,degree,registered_on,subscription_end))
+        conn.commit()
+        student_id = c.lastrowid
+        conn.close()
+        return jsonify({"status":"success","student_id":student_id})
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"status":"error","message":"Email already registered"}),400
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    html = """
-    <h1>Student Login</h1>
-    <form method='post'>
-        Email: <input name='email'><br>
-        Password: <input type='password' name='password'><br>
-        <button type='submit'>Login</button>
-    </form>
-    """
-    if request.method == "POST":
-        email = request.form['email']
-        password = request.form['password']
-        student = query_db("SELECT * FROM students WHERE email=? AND password=?", (email, password), one=True)
-        if student:
-            return redirect(url_for("dashboard", student_id=student[0]))
-        return "Invalid login"
-    return render_template_string(html)
+# -----------------------
+# Enrollment
+# -----------------------
+@app.route("/enroll", methods=["POST"])
+def enroll():
+    data = request.json
+    student_id = int(data.get("student_id"))
+    course_id = int(data.get("course_id"))
+    
+    start_date = datetime.utcnow().isoformat()
+    end_date = (datetime.utcnow() + timedelta(days=180)).isoformat()
+    
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO enrollments (student_id,course_id,start_date,end_date) VALUES (?,?,?,?)",
+              (student_id,course_id,start_date,end_date))
+    conn.commit()
+    conn.close()
+    
+    # Mock payment request to Lonestar API
+    # Normally here you would call their API with proper authentication
+    payment_status = "pending"  # Assume payment pending
+    return jsonify({"status":"enrolled","payment_status":payment_status})
 
-@app.route("/dashboard/<int:student_id>")
-def dashboard(student_id):
-    student = query_db("SELECT * FROM students WHERE id=?", (student_id,), one=True)
-    courses = query_db("SELECT id, title FROM courses")
-    html = """
-    <h1>Welcome {{student[1]}}</h1>
-    <p>Registration Paid: {{student[4]}}</p>
-    <p>Tuition Paid: {{student[5]}}</p>
-    <p>Scholarship Eligible: {{student[7]}}</p>
-    <h2>Courses</h2>
-    {% for c in courses %}
-        <div>
-            <p>{{c[1]}} - <a href='/enroll/{{student[0]}}/{{c[0]}}'>Enroll</a></p>
-        </div>
-    {% endfor %}
-    <h2>Certificates & Transcripts</h2>
-    <a href='/certificate/{{student[0]}}'>Download Certificate</a><br>
-    <a href='/transcript/{{student[0]}}'>Download Transcript</a>
-    """
-    return render_template_string(html, student=student, courses=courses)
-
-@app.route("/enroll/<int:student_id>/<int:course_id>")
-def enroll(student_id, course_id):
-    success, ref = make_payment(student_id, TOTAL_TUITION)
-    query_db("UPDATE students SET tuition_paid=1, credits=credits+30, grade=grade+4.0, scholarship=1 WHERE id=?", (student_id,))
-    course = query_db("SELECT title FROM courses WHERE id=?", (course_id,), one=True)
-    return f"Enrolled in {course[0]} successfully! Tuition payment ref: {ref} <a href='/dashboard/{student_id}'>Back</a>"
-
-@app.route("/certificate/<int:student_id>")
-def certificate(student_id):
-    student = query_db("SELECT name FROM students WHERE id=?", (student_id,), one=True)
-    course = "Any Course"  # simplified
-    filename = generate_certificate(student[0], course)
-    return send_file(filename, as_attachment=True)
-
-@app.route("/transcript/<int:student_id>")
-def transcript(student_id):
-    student = query_db("SELECT * FROM students WHERE id=?", (student_id,), one=True)
-    filename = generate_transcript(student)
-    return send_file(filename, as_attachment=True)
-
-@app.route("/admin/add_course", methods=["GET", "POST"])
-def add_course():
-    html = """
-    <h1>Add Course (Admin)</h1>
-    <form method='post'>
-        Title: <input name='title'><br>
-        Description: <input name='description'><br>
-        Duration (months): <input name='duration'><br>
-        <button type='submit'>Add Course</button>
-    </form>
-    """
-    if request.method == "POST":
-        title = request.form['title']
-        description = request.form['description']
-        duration = int(request.form['duration'])
-        query_db("INSERT INTO courses (title, description, duration_months) VALUES (?, ?, ?)",
-                 (title, description, duration))
-        return "Course added! <a href='/'>Home</a>"
-    return render_template_string(html)
-
-# ---------- Run App ----------
+# -----------------------
+# Run app
+# -----------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
+    app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
