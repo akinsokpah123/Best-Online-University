@@ -1,155 +1,257 @@
-from flask import Flask, request, jsonify, render_template_string, send_file
+# app.py
+from flask import Flask, request, jsonify, render_template_string, send_file, redirect, url_for
 import sqlite3
-import requests
 import os
-import pdfkit
-from datetime import datetime, timedelta
+import datetime
+from io import BytesIO
+from reportlab.pdfgen import canvas
+import requests
 
+# =========================
+# CONFIGURATION
+# =========================
 app = Flask(__name__)
+DATABASE = 'university.db'
+LONESTAR_API_KEY = os.getenv('LONESTAR_API_KEY')  # Set in Render environment variables
+ADMIN_PASSWORD = "admin123"  # Change this to a secure password
 
-# ======================
-# CONFIG
-# ======================
-LONESTAR_API_KEY = os.getenv("LONESTAR_API_KEY")
-DB_FILE = "akin_online_university.db"
-
-# ======================
+# =========================
 # DATABASE SETUP
-# ======================
+# =========================
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    # Users table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            email TEXT UNIQUE,
-            phone TEXT,
-            registration_date TEXT,
-            subscription_end TEXT,
-            total_paid REAL DEFAULT 0
-        )
-    """)
+    # Students table
+    c.execute('''CREATE TABLE IF NOT EXISTS students (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT,
+                 email TEXT,
+                 phone TEXT,
+                 level TEXT,
+                 registration_fee_paid INTEGER DEFAULT 0,
+                 course_fee_paid INTEGER DEFAULT 0,
+                 enrollment_date TEXT
+                 )''')
     # Courses table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS courses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            description TEXT,
-            price REAL,
-            duration_months INTEGER
-        )
-    """)
+    c.execute('''CREATE TABLE IF NOT EXISTS courses (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT,
+                 description TEXT,
+                 fee INTEGER
+                 )''')
     # Payments table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            course_id INTEGER,
-            amount REAL,
-            payment_date TEXT,
-            status TEXT
-        )
-    """)
+    c.execute('''CREATE TABLE IF NOT EXISTS payments (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 student_id INTEGER,
+                 amount INTEGER,
+                 reference TEXT,
+                 status TEXT,
+                 date TEXT
+                 )''')
     conn.commit()
     conn.close()
 
-# Initialize DB before first request
-@app.before_first_request
-def setup():
-    init_db()
+init_db()
 
-# ======================
-# HELPER FUNCTIONS
-# ======================
-def make_payment(phone, amount):
-    """Call Lonestar API for payment"""
-    url = "https://api.lonestarmobile.com/payment"
-    headers = {"Authorization": f"Bearer {LONESTAR_API_KEY}"}
-    data = {"phone": phone, "amount": amount}
-    response = requests.post(url, json=data, headers=headers)
-    return response.json()  # Expect {"status": "success"} or {"status": "failed"}
+# =========================
+# HTML TEMPLATES
+# =========================
+HOME_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>Akin Online University</title>
+</head>
+<body>
+<h1>Welcome to Akin Online University</h1>
+<a href="/courses">View Courses</a><br>
+<a href="/register">Register</a>
+</body>
+</html>
+"""
 
-# ======================
+COURSES_HTML = """
+<!DOCTYPE html>
+<html>
+<head><title>Courses</title></head>
+<body>
+<h1>Courses</h1>
+<ul>
+{% for course in courses %}
+<li>{{ course[1] }} - Fee: ${{ course[3] }} <a href="/enroll/{{ course[0] }}">Enroll</a></li>
+{% endfor %}
+</ul>
+<a href="/">Home</a>
+</body>
+</html>
+"""
+
+REGISTER_HTML = """
+<!DOCTYPE html>
+<html>
+<head><title>Register</title></head>
+<body>
+<h1>Student Registration</h1>
+<form action="/register" method="post">
+Name: <input type="text" name="name" required><br>
+Email: <input type="email" name="email" required><br>
+Phone: <input type="text" name="phone" required><br>
+Level: 
+<select name="level">
+<option value="undergraduate">Undergraduate</option>
+<option value="postgraduate">Postgraduate</option>
+</select><br>
+<input type="submit" value="Register">
+</form>
+<a href="/">Home</a>
+</body>
+</html>
+"""
+
+# =========================
 # ROUTES
-# ======================
-@app.route("/healthz")
+# =========================
+@app.route('/')
+def home():
+    return render_template_string(HOME_HTML)
+
+@app.route('/courses')
+def courses():
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT * FROM courses")
+    courses = c.fetchall()
+    conn.close()
+    return render_template_string(COURSES_HTML, courses=courses)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        name = request.form['name']
+        email = request.form['email']
+        phone = request.form['phone']
+        level = request.form['level']
+        enrollment_date = str(datetime.date.today())
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("INSERT INTO students (name,email,phone,level,enrollment_date) VALUES (?,?,?,?,?)",
+                  (name,email,phone,level,enrollment_date))
+        conn.commit()
+        conn.close()
+        return f"Registered {name}! <a href='/courses'>View Courses</a>"
+    return render_template_string(REGISTER_HTML)
+
+# =========================
+# ENROLLMENT & PAYMENT
+# =========================
+@app.route('/enroll/<int:course_id>')
+def enroll(course_id):
+    # For simplicity, pick student_id=1 (demo), replace with real login system
+    student_id = 1
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT fee FROM courses WHERE id=?", (course_id,))
+    course = c.fetchone()
+    if not course:
+        return "Course not found"
+    fee = course[0]
+    # Initiate Lonestar payment
+    payment_ref = f"UNI{student_id}{course_id}{int(datetime.datetime.now().timestamp())}"
+    payment_data = {
+        "api_key": LONESTAR_API_KEY,
+        "amount": fee,
+        "msisdn": "231XXXXXXXXX",  # Replace with student phone
+        "reference": payment_ref
+    }
+    # Demo: simulate API request
+    # resp = requests.post("https://lonestar.api/pay", data=payment_data)
+    # Here we just assume success
+    c.execute("INSERT INTO payments (student_id, amount, reference, status, date) VALUES (?,?,?,?,?)",
+              (student_id, fee, payment_ref, "paid", str(datetime.datetime.now())))
+    conn.commit()
+    conn.close()
+    return f"Enrolled and paid ${fee} for course {course_id}! Reference: {payment_ref}"
+
+# =========================
+# PDF GENERATION
+# =========================
+@app.route('/certificate/<int:student_id>')
+def certificate(student_id):
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT name,level FROM students WHERE id=?", (student_id,))
+    student = c.fetchone()
+    conn.close()
+    if not student:
+        return "Student not found"
+    buffer = BytesIO()
+    p = canvas.Canvas(buffer)
+    p.drawString(100, 750, "Akin Online University")
+    p.drawString(100, 720, f"Certificate of Enrollment")
+    p.drawString(100, 690, f"Student: {student[0]}")
+    p.drawString(100, 660, f"Level: {student[1]}")
+    p.drawString(100, 630, f"Date: {datetime.date.today()}")
+    p.showPage()
+    p.save()
+    buffer.seek(0)
+    return send_file(buffer, as_attachment=True, download_name="certificate.pdf", mimetype='application/pdf')
+
+# =========================
+# ADMIN DASHBOARD
+# =========================
+@app.route('/admin')
+def admin_home():
+    return """
+    <h1>Admin Dashboard</h1>
+    <a href='/admin/courses'>Manage Courses</a>
+    """
+
+@app.route('/admin/courses', methods=['GET', 'POST'])
+def admin_courses():
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    if request.method == 'POST':
+        name = request.form['name']
+        desc = request.form['desc']
+        fee = int(request.form['fee'])
+        c.execute("INSERT INTO courses (name, description, fee) VALUES (?,?,?)", (name, desc, fee))
+        conn.commit()
+    c.execute("SELECT * FROM courses")
+    courses = c.fetchall()
+    conn.close()
+    course_list = "<ul>"
+    for course in courses:
+        course_list += f"<li>{course[1]} - ${course[3]}</li>"
+    course_list += "</ul>"
+    return f"""
+    <h1>Manage Courses</h1>
+    {course_list}
+    <form method='post'>
+    Name: <input type='text' name='name'><br>
+    Description: <input type='text' name='desc'><br>
+    Fee: <input type='number' name='fee'><br>
+    <input type='submit' value='Add Course'>
+    </form>
+    """
+
+# =========================
+# HEALTH CHECK
+# =========================
+@app.route('/healthz')
 def healthz():
     return "ok", 200
 
-@app.route("/")
-def home():
-    return render_template_string("""
-    <h1>Welcome to Akin Online University</h1>
-    <p>Courses, subscriptions, certificates all online!</p>
-    """)
-
-@app.route("/register", methods=["POST"])
-def register():
-    data = request.json
-    name = data.get("name")
-    email = data.get("email")
-    phone = data.get("phone")
-    registration_date = datetime.now().strftime("%Y-%m-%d")
-    subscription_end = (datetime.now() + timedelta(days=180)).strftime("%Y-%m-%d")  # default 6 months
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO users (name,email,phone,registration_date,subscription_end) VALUES (?,?,?,?,?)",
-                  (name,email,phone,registration_date,subscription_end))
-        conn.commit()
-        user_id = c.lastrowid
-        return jsonify({"status":"success","user_id":user_id})
-    except sqlite3.IntegrityError:
-        return jsonify({"status":"error","message":"Email already registered"})
-    finally:
-        conn.close()
-
-@app.route("/enroll", methods=["POST"])
-def enroll():
-    data = request.json
-    user_id = data.get("user_id")
-    course_id = data.get("course_id")
-    amount = data.get("amount")
-    phone = data.get("phone")
-
-    payment_result = make_payment(phone, amount)
-    if payment_result.get("status") != "success":
-        return jsonify({"status":"failed","message":"Payment failed"})
-
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO payments (user_id, course_id, amount,payment_date,status) VALUES (?,?,?,?,?)",
-              (user_id, course_id, amount, datetime.now().strftime("%Y-%m-%d"), "success"))
-    conn.commit()
-    conn.close()
-    return jsonify({"status":"success","message":"Enrollment successful"})
-
-@app.route("/certificate/<int:user_id>/<int:course_id>")
-def certificate(user_id, course_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT name,email FROM users WHERE id=?", (user_id,))
-    user = c.fetchone()
-    c.execute("SELECT name FROM courses WHERE id=?", (course_id,))
-    course = c.fetchone()
-    conn.close()
-
-    if not user or not course:
-        return "User or Course not found",404
-
-    html = f"""
-    <h1>Certificate of Completion</h1>
-    <p>This certifies that {user[0]} ({user[1]}) has completed the course <b>{course[0]}</b> successfully.</p>
-    <p>Date: {datetime.now().strftime('%Y-%m-%d')}</p>
-    """
-    pdf_file = f"certificate_{user_id}_{course_id}.pdf"
-    pdfkit.from_string(html, pdf_file)
-    return send_file(pdf_file, as_attachment=True)
-
-# ======================
-# RUN
-# ======================
+# =========================
+# RUN APP
+# =========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=10000, debug=True)
+
+# =========================
+# REQUIREMENTS (requirements.txt content)
+# =========================
+"""
+Flask==3.1.1
+requests==2.31.0
+reportlab==4.0.0
+"""
